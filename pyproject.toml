@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inventree-label-dispatch"
+description = "InvenTree machine driver that dispatches labels to a labelfab print agent"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "sengine" }]
+keywords = ["inventree", "labelfab", "phomemo", "label", "mqtt"]
+dynamic = ["version"]
+dependencies = [
+  "paho-mqtt>=2.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.4"]
+
+# How InvenTree's plugin registry discovers the plugin. InvenTree and its machine /
+# plugin / DRF packages are provided by the host application at runtime, so they are
+# deliberately not dependencies here.
+[project.entry-points."inventree_plugins"]
+LabelfabDispatch = "inventree_label_dispatch.plugin:LabelfabDispatchPlugin"
+
+[project.urls]
+Homepage = "https://github.com/sengine-cloud/inventree-label-dispatch"
+
+[tool.hatch.version]
+path = "inventree_label_dispatch/version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["inventree_label_dispatch"]
+
+[tool.ruff]
+line-length = 105
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
