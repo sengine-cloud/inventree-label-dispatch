@@ -13,6 +13,39 @@ the UI**. A Bluetooth D30 is asleep by default; surfacing that before someone cl
 print is most of the usability. Status is read from the printer's retained MQTT topic,
 so there is no polling loop in the Django worker.
 
+## What the status actually says
+
+The retained status carries the printer's own report — firmware, battery percentage
+*and* terminal voltage, and whether media is loaded — so the Machines page reflects the
+device rather than just the agent's liveness. The mapping lives in `status.py`, free of
+InvenTree imports so it is unit-tested here:
+
+| Printer reports | Machines status |
+|---|---|
+| nothing retained | `UNKNOWN` — the agent has never published |
+| `state: idle`, media ok | `CONNECTED` |
+| media bit clear (`0x06`) | **`NO_MEDIA`** — "load tape", not "investigate" |
+| any other fault | `ERROR`, carrying the reason |
+| agent will / shutdown | `DISCONNECTED` |
+
+Two deliberate distinctions. **Unreported media is not healthy media**: `media_ok` is a
+tri-state, and a printer that has said nothing shows "media unreported" rather than
+"media ok". And **battery percentage alone is not enough** — it pins at 100% whenever
+the unit is on charge, so the voltage is shown beside it.
+
+## Print outcomes
+
+`AWAIT_RESULT_S` (default 15s, 0 disables) makes the driver wait for the job's
+`JobResult` after dispatching, so the UI reports what actually happened instead of
+"dispatched". It subscribes *before* publishing — the results topic is not retained, so
+subscribing afterwards races the agent — and filters on `job_id`, because one printer
+serves every user and a stranger's result must not be mistaken for yours.
+
+A timeout is an ordinary outcome, not a failure: strip mode holds labels until the
+agent's coalescer flushes (30s by default), so the job can legitimately outlive any
+wait short enough to block a Django-Q worker on. It stays `PRINTING`, and the next
+status refresh picks up the truth from the retained topic.
+
 ## How it works
 
 - Default path sends `{preset, vars}` — the producer stays dumb and layout ownership

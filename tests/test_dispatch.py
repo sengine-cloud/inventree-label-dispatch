@@ -78,3 +78,80 @@ def test_publish_sends_job_to_the_printers_jobs_topic(monkeypatch):
     assert topic == "se/v1/print/d30-workshop/jobs"
     assert qos == 1
     assert json.loads(payload)["job_id"] == job["job_id"]
+
+
+class _ReplyingClient(_FakeClient):
+    """A broker that answers each publish with results, in subscribe-then-publish order."""
+
+    def __init__(self, replies):
+        super().__init__()
+        self.replies = replies
+        self.subscribed = []
+        self.on_message = None
+        self.order = []
+
+    def subscribe(self, topic, qos=0):
+        self.subscribed.append(topic)
+        self.order.append("subscribe")
+
+    def publish(self, topic, payload, qos=0):
+        self.order.append("publish")
+        info = super().publish(topic, payload, qos)
+        for reply in self.replies:
+            self.on_message(self, None, type("Msg", (), {"payload": json.dumps(reply).encode()})())
+        return info
+
+
+def test_awaiting_result_subscribes_before_publishing(monkeypatch):
+    """The results topic is not retained, so subscribing after publish loses fast prints."""
+    job = build_job("d30-workshop", [build_label({"preset": "stock_item", "vars": {"code": "S"}})])
+    fake = _ReplyingClient([{"job_id": job["job_id"], "state": "completed"}])
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    result = dispatch.publish_awaiting_result(job, Connection(host="broker"), timeout_s=1.0)
+
+    assert fake.order == ["subscribe", "publish"]
+    assert fake.subscribed == ["se/v1/print/d30-workshop/results"]
+    assert result["state"] == "completed"
+
+
+def test_awaiting_result_ignores_another_clicks_result(monkeypatch):
+    """One printer serves every InvenTree user; a stranger's result is not ours."""
+    job = build_job("d30-workshop", [build_label({"preset": "stock_item", "vars": {"code": "S"}})])
+    fake = _ReplyingClient(
+        [
+            {"job_id": "someone-elses-job", "state": "failed", "error": "not ours"},
+            {"job_id": job["job_id"], "state": "completed"},
+        ]
+    )
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    result = dispatch.publish_awaiting_result(job, Connection(host="broker"), timeout_s=1.0)
+    assert result["job_id"] == job["job_id"]
+    assert result["state"] == "completed"
+
+
+def test_awaiting_result_returns_none_on_timeout(monkeypatch):
+    """A strip that has not flushed yet is an ordinary outcome, not an error."""
+    job = build_job("d30-workshop", [build_label({"preset": "stock_item", "vars": {"code": "S"}})])
+    fake = _ReplyingClient([])  # broker says nothing
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    assert dispatch.publish_awaiting_result(job, Connection(host="broker"), timeout_s=0.05) is None
+
+
+def test_awaiting_result_survives_a_malformed_payload(monkeypatch):
+    """A non-JSON message on the topic must not take down a print."""
+    job = build_job("d30-workshop", [build_label({"preset": "stock_item", "vars": {"code": "S"}})])
+    fake = _ReplyingClient([{"job_id": job["job_id"], "state": "completed"}])
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    original = fake.publish
+
+    def publish_with_garbage(topic, payload, qos=0):
+        fake.on_message(fake, None, type("Msg", (), {"payload": b"not json"})())
+        return original(topic, payload, qos)
+
+    fake.publish = publish_with_garbage
+    result = dispatch.publish_awaiting_result(job, Connection(host="broker"), timeout_s=1.0)
+    assert result["state"] == "completed"

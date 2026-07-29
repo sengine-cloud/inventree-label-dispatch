@@ -103,6 +103,50 @@ def publish(job: dict, conn: Connection) -> None:
         client.disconnect()
 
 
+def publish_awaiting_result(job: dict, conn: Connection, timeout_s: float) -> dict | None:
+    """Publish a job and wait for *its* ``JobResult``, or ``None`` on timeout.
+
+    Subscribes before publishing. The results topic is **not** retained, so subscribing
+    afterwards races the agent and would lose the result of a fast print entirely.
+
+    Filters on ``job_id``: one printer serves every InvenTree user, so another click's
+    result can land on this subscription and must not be mistaken for ours.
+
+    A timeout is an ordinary outcome, not an error. Strip mode holds labels until the
+    coalescer flushes -- up to ``strip.max_wait_s`` on the agent, 30s by default -- so a
+    job can legitimately outlive any wait short enough to block a worker on.
+    """
+    import queue
+
+    printer_id = job["printer"]["id"]
+    job_id = job["job_id"]
+    received: queue.Queue = queue.Queue()
+
+    def _on_message(_c, _u, msg):
+        try:
+            payload = json.loads(msg.payload)
+        except Exception:
+            return
+        if payload.get("job_id") == job_id:
+            received.put_nowait(payload)
+
+    client = _new_client(conn, "job")
+    client.on_message = _on_message
+    client.connect(conn.host, conn.port, conn.keepalive_s)
+    client.subscribe(conn.topic(printer_id, "results"), qos=1)
+    client.loop_start()
+    try:
+        info = client.publish(conn.topic(printer_id, "jobs"), json.dumps(job), qos=1)
+        info.wait_for_publish(conn.timeout_s)
+        try:
+            return received.get(timeout=timeout_s)
+        except queue.Empty:
+            return None
+    finally:
+        client.loop_stop()
+        client.disconnect()
+
+
 def read_status(printer_id: str, conn: Connection) -> dict | None:
     """One-shot read of the retained status topic. ``None`` if nothing is retained.
 

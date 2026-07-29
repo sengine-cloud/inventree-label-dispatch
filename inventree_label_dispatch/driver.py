@@ -30,8 +30,9 @@ from machine.machine_types.label_printer import LabelPrinterStatus
 from rest_framework import serializers
 
 from .config import connection_from_env
-from .dispatch import build_job, build_label, publish, read_status
+from .dispatch import build_job, build_label, publish, publish_awaiting_result, read_status
 from .extractors import extract
+from .status import classify_result, classify_status
 
 
 def _as_bool(value) -> bool:
@@ -73,6 +74,17 @@ class LabelfabDriver(LabelPrinterBaseDriver):
             "default": False,
             "validator": bool,
         },
+        "AWAIT_RESULT_S": {
+            "name": _("Wait for the print result (seconds)"),
+            "description": _(
+                "Block after dispatching to report the real outcome instead of just "
+                "'dispatched'. 0 disables. Note this holds a Django-Q worker for up to "
+                "this long, and strip mode may not flush until the agent's coalescer "
+                "window elapses, in which case the wait times out harmlessly."
+            ),
+            "default": "15",
+            "validator": float,
+        },
     }
 
     class PrintingOptionsSerializer(LabelPrinterBaseDriver.PrintingOptionsSerializer):
@@ -91,20 +103,20 @@ class LabelfabDriver(LabelPrinterBaseDriver):
     def init_machine(self, machine) -> None:
         self._refresh_status(machine)
 
+    def _apply(self, machine, member: str, text: str) -> None:
+        """Set a status by member name, so the mapping stays free of InvenTree imports."""
+        machine.set_status(getattr(LabelPrinterStatus, member))
+        machine.set_status_text(text)
+
     def _refresh_status(self, machine) -> None:
         printer_id = machine.get_setting("PRINTER_ID", "D")
         try:
             status = read_status(printer_id, connection_from_env())
-        except Exception:
+        except Exception as exc:
             machine.set_status(LabelPrinterStatus.UNKNOWN)
-            machine.set_status_text(_("could not reach the broker"))
+            machine.set_status_text(_("could not reach the broker: %(err)s") % {"err": str(exc)[:80]})
             return
-        if status is None:
-            machine.set_status(LabelPrinterStatus.UNKNOWN)
-        elif status.get("state") == "disconnected":
-            machine.set_status(LabelPrinterStatus.DISCONNECTED)
-        else:
-            machine.set_status(LabelPrinterStatus.CONNECTED)
+        self._apply(machine, *classify_status(status))
 
     # -- printing ----------------------------------------------------------- #
 
@@ -138,14 +150,25 @@ class LabelfabDriver(LabelPrinterBaseDriver):
             batch_mode="discrete" if tape_kind == "gap" else "strip",
             template_id=getattr(label, "pk", None),
         )
+        conn = connection_from_env()
+        await_s = float(machine.get_setting("AWAIT_RESULT_S", "D") or 0)
         try:
-            publish(job, connection_from_env())
+            # Publishing is the only step that can fail locally. A print that fails at
+            # the printer comes back as a JobResult, not an exception.
+            if await_s > 0:
+                result = publish_awaiting_result(job, conn, await_s)
+            else:
+                publish(job, conn)
+                result = None
         except Exception as exc:
             machine.set_status(LabelPrinterStatus.DISCONNECTED)
             machine.set_status_text(_("dispatch failed: %(err)s") % {"err": str(exc)[:120]})
             raise
-        machine.set_status(LabelPrinterStatus.PRINTING)
-        machine.set_status_text(_("dispatched %(n)d label(s)") % {"n": len(labels)})
+
+        if await_s > 0:
+            self._apply(machine, *classify_result(result, dispatched=len(labels)))
+        else:
+            self._apply(machine, "PRINTING", _("dispatched %(n)d label(s)") % {"n": len(labels)})
 
     # -- helpers ------------------------------------------------------------ #
 
