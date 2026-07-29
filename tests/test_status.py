@@ -42,8 +42,13 @@ def _healthy(**over) -> dict:
     return base
 
 
-def test_every_mapping_names_a_real_status_member():
-    """A typo here silently becomes AttributeError inside the driver at runtime."""
+def test_no_mapping_returns_a_misspelled_member_name():
+    """A typo becomes AttributeError inside a Django worker rather than failing here.
+
+    This catches typos, not drift from InvenTree's enum: VALID_MEMBERS is a local copy,
+    because InvenTree is deliberately not a test dependency of this package. Drift would
+    have to be caught by the integration environment.
+    """
     cases = [
         None,
         _healthy(),
@@ -166,3 +171,47 @@ def test_every_contract_job_state_maps_somewhere_valid(state):
     member, text = classify_result({"state": state}, dispatched=1)
     assert member in VALID_MEMBERS
     assert text
+
+
+def test_partial_is_terminal_and_says_what_actually_printed():
+    """The agent sets partial from `any_printed and any_failed` when finalising a job.
+
+    So it is terminal, not in-flight, and the operator needs the counts to know what to
+    reprint -- falling through to a bare "job partial" tells them nothing.
+    """
+    member, text = classify_result(
+        {
+            "state": "partial",
+            "labels": [
+                {"index": 0, "state": "printed", "copies_done": 2},
+                {"index": 1, "state": "failed", "copies_done": 0},
+                {"index": 2, "state": "failed", "copies_done": 0},
+            ],
+        },
+        dispatched=3,
+    )
+    assert member == "ERROR"
+    assert "printed 2 of 3 label(s)" in text
+    assert "2 failed" in text
+
+
+def test_partial_still_flags_partial_tape():
+    _member, text = classify_result(
+        {
+            "state": "partial",
+            "partial_tape_consumed": True,
+            "labels": [{"index": 0, "state": "printed", "copies_done": 1}],
+        },
+        dispatched=2,
+    )
+    assert "tape partially consumed" in text
+
+
+def test_a_rejected_job_reports_why():
+    """Rejection is a contract problem -- wrong model, bad spec -- so the reason matters."""
+    member, text = classify_result(
+        {"state": "rejected", "error": "this agent drives phomemo-d30, not phomemo-m110"},
+        dispatched=1,
+    )
+    assert member == "ERROR"
+    assert "phomemo-m110" in text

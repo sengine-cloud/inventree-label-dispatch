@@ -95,14 +95,32 @@ def classify_result(result: dict | None, *, dispatched: int) -> tuple[str, str]:
         return "PRINTING", f"dispatched {dispatched} label(s); awaiting confirmation"
 
     state = result.get("state")
+    labels = result.get("labels") or []
+    printed = sum(label.get("copies_done", 0) for label in labels)
+
     if state in _GOOD_JOB_STATES:
-        printed = sum(label.get("copies_done", 0) for label in result.get("labels") or [])
         return "CONNECTED", f"printed {printed or dispatched} label(s)"
 
-    error = result.get("error") or f"job {state}"
+    if state == "partial":
+        # Terminal, not in-flight: the agent sets this from `any_printed and any_failed`
+        # when it finalises the job. So some tape came out and some labels did not, and
+        # the operator needs the counts to know what to reprint -- "job partial" on its
+        # own tells them nothing.
+        failed = sum(1 for label in labels if label.get("state") == "failed")
+        detail = result.get("error")
+        member = "ERROR"
+        text = f"printed {printed} of {len(labels)} label(s), {failed} failed"
+        if detail:
+            text = f"{text} — {detail}"
+    elif state == "stalled":
+        member = "DISCONNECTED"
+        text = f"printer unreachable, job requeued — {result.get('error') or 'job stalled'}"
+    else:
+        member = "ERROR"
+        text = result.get("error") or f"job {state}"
+
+    # Appended after the branches, not inside one: every non-success outcome can have
+    # moved tape, and a blind reprint after that double-prints whatever came out.
     if result.get("partial_tape_consumed"):
-        # Worth surfacing loudly: some tape came out, so a blind reprint double-prints.
-        error = f"{error} (tape partially consumed — check before reprinting)"
-    if state == "stalled":
-        return "DISCONNECTED", f"printer unreachable, job requeued — {error}"
-    return "ERROR", error
+        text = f"{text} (tape partially consumed — check before reprinting)"
+    return member, text
