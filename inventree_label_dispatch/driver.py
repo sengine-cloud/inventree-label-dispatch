@@ -20,7 +20,13 @@ import base64
 import io
 
 from django.utils.translation import gettext_lazy as _
-from machine.machine_types import LabelPrinterBaseDriver, LabelPrinterStatus
+from machine.machine_types import LabelPrinterBaseDriver
+
+# LabelPrinterStatus is defined in the submodule and NOT re-exported from the
+# machine.machine_types package (only LabelPrinterBaseDriver / LabelPrinterMachine
+# are). Importing it from the package raises ImportError, which makes InvenTree drop
+# the whole plugin silently -- so it must come from the submodule.
+from machine.machine_types.label_printer import LabelPrinterStatus
 from rest_framework import serializers
 
 from .config import connection_from_env
