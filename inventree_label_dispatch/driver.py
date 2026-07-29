@@ -78,11 +78,13 @@ class LabelfabDriver(LabelPrinterBaseDriver):
             "name": _("Wait for the print result (seconds)"),
             "description": _(
                 "Block after dispatching to report the real outcome instead of just "
-                "'dispatched'. 0 disables. Note this holds a Django-Q worker for up to "
-                "this long, and strip mode may not flush until the agent's coalescer "
-                "window elapses, in which case the wait times out harmlessly."
+                "'dispatched'. Off by default: it holds a Django-Q worker for up to this "
+                "long, and in strip mode the agent deliberately buffers labels until its "
+                "coalescer flushes (30s by default), so the wait usually times out and "
+                "the status is left to the retained topic anyway. Worth enabling on "
+                "die-cut/discrete media, where a result comes back in a few seconds."
             ),
-            "default": "15",
+            "default": "0",
             "validator": float,
         },
     }

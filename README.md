@@ -35,16 +35,19 @@ the unit is on charge, so the voltage is shown beside it.
 
 ## Print outcomes
 
-`AWAIT_RESULT_S` (default 15s, 0 disables) makes the driver wait for the job's
-`JobResult` after dispatching, so the UI reports what actually happened instead of
-"dispatched". It subscribes *before* publishing — the results topic is not retained, so
-subscribing afterwards races the agent — and filters on `job_id`, because one printer
-serves every user and a stranger's result must not be mistaken for yours.
+`AWAIT_RESULT_S` makes the driver wait for the job's `JobResult` after dispatching, so
+the UI reports what actually happened instead of "dispatched". It subscribes *before*
+publishing — the results topic is not retained, so subscribing afterwards races the
+agent — and filters on `job_id`, because one printer serves every user and a stranger's
+result must not be mistaken for yours.
 
-A timeout is an ordinary outcome, not a failure: strip mode holds labels until the
-agent's coalescer flushes (30s by default), so the job can legitimately outlive any
-wait short enough to block a Django-Q worker on. It stays `PRINTING`, and the next
-status refresh picks up the truth from the retained topic.
+**It is off by default (`0`).** The wait holds a Django-Q worker, and in strip mode the
+agent deliberately buffers labels until its coalescer flushes — 30s by default — so the
+wait would usually time out and leave the status to the retained topic regardless.
+Enable it on die-cut/discrete media, where a result comes back in a few seconds.
+
+A timeout is an ordinary outcome, not a failure: the status stays `PRINTING` and the
+next refresh picks up the truth from the retained topic.
 
 ## How it works
 
