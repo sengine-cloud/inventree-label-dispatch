@@ -110,6 +110,37 @@ class LabelfabDriver(LabelPrinterBaseDriver):
         machine.set_status(getattr(LabelPrinterStatus, member))
         machine.set_status_text(text)
 
+    def restart_machine(self, machine) -> None:
+        """Re-read the printer's state after a manual restart.
+
+        A restart clears the machine's shared state, and without this nothing puts it
+        back: the page then shows UNKNOWN with an empty status text -- the defaults
+        `get_shared_state` returns for missing keys -- while the machine itself
+        reports `initialized`, no errors and a driver available. An empty status text
+        is diagnostic on its own, since no path in this driver produces one.
+        """
+        self._refresh_status(machine)
+
+    def ping_machines(self) -> None:
+        """Periodic refresh, driven by InvenTree's MACHINE_PING_ENABLED (default on).
+
+        This is what keeps the page honest between prints. It matters more than it
+        looks: machine status lives in the Django cache, so when that cache is cleared
+        -- a Redis restart, and this deployment runs Redis deliberately without
+        persistence -- every `machine:*` key vanishes at once. Before this hook the
+        only thing that re-read the retained topic was machine initialisation, so the
+        page stayed blank until someone printed or the pods restarted.
+
+        One machine's broker trouble must not stop the others being refreshed, hence
+        the per-machine guard. `_refresh_status` already turns an unreachable broker
+        into an UNKNOWN status rather than an exception; this catches anything else.
+        """
+        for machine in self.get_machines():
+            try:
+                self._refresh_status(machine)
+            except Exception as exc:  # noqa: BLE001 - one machine must not break the loop
+                machine.handle_error(exc)
+
     def _refresh_status(self, machine) -> None:
         printer_id = machine.get_setting("PRINTER_ID", "D")
         try:

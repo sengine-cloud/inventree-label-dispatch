@@ -28,6 +28,22 @@ InvenTree imports so it is unit-tested here:
 | any other fault | `ERROR`, carrying the reason |
 | agent will / shutdown | `DISCONNECTED` |
 
+### When it refreshes
+
+The status is read from the retained topic in three places, which between them keep the
+page honest without polling the printer itself:
+
+| when | hook |
+|---|---|
+| machine initialisation | `init_machine` |
+| a manual restart from the Admin Center | `restart_machine` |
+| periodically | `ping_machines`, driven by InvenTree's `MACHINE_PING_ENABLED` (on by default) |
+
+The periodic one is not a nicety. Machine status lives in the Django cache, so clearing
+that cache drops every `machine:*` key at once — and this deployment runs Redis without
+persistence, so a restart does exactly that. With only `init_machine` the page then sat
+at `UNKNOWN` with an empty status text until someone printed or the pods restarted.
+
 Two deliberate distinctions. **Unreported media is not healthy media**: `media_ok` is a
 tri-state, and a printer that has said nothing shows "media unreported" rather than
 "media ok". And **battery percentage alone is not enough** — it pins at 100% whenever
