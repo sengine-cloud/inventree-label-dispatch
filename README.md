@@ -53,6 +53,7 @@ republishes what it last heard rather than going quiet, and the age of that read
 shown alongside it.
 
 ```
+CONNECTED   fw 2.1.2 · 100% (4.17V) · media ok · Q223P4C31420105 · seen just now
 CONNECTED   fw 2.1.2 · 100% (4.17V) · media ok · Q223P4C31420105 · seen 6h ago
 ```
 
@@ -60,6 +61,15 @@ The age comes from `device_seen_at` on the retained status. It annotates the rea
 rather than overruling it — a printer that had tape six hours ago is far likelier to
 still have tape than to have anything else — so the status mapping is unchanged. An
 agent too old to publish the field renders exactly as it did before.
+
+One case the age cannot cover: the agent's MQTT will is fixed when its connection opens
+and the broker holds it, so a printer fault learned *during* that session cannot reach
+it. If the agent is then killed, the broker publishes the older, healthier reading over
+the newer one, and this page renders it — correctly marked `DISCONNECTED`, but with a
+stale-healthy detail line. It is self-correcting rather than sticky: the agent restarts
+(`Restart=always`, `RestartSec=5`), seeds from its spool, which does have the fault, and
+republishes. Nothing here can detect the window, since retained MQTT v3.1.1 messages
+carry no publish timestamp.
 
 ## Print outcomes
 

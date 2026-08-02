@@ -29,8 +29,13 @@ from datetime import datetime, timezone
 _GOOD_JOB_STATES = frozenset({"completed"})
 
 
-def _ago(seen, now: datetime) -> str:
+def _ago(seen: object, now: datetime) -> str:
     """How long ago the device fields were true, as a short suffix. ``""`` if unknown.
+
+    ``seen`` is typed as ``object`` rather than ``str | None`` on purpose: it comes
+    straight out of ``json.loads`` on a payload this process did not produce, so it can
+    be any JSON type at all, and pretending otherwise would just move the lie into the
+    annotation.
 
     Empty rather than a guess in three cases, all of which mean the same thing: nobody
     said. An agent older than the field simply omits it, and the page should look
@@ -52,6 +57,11 @@ def _ago(seen, now: datetime) -> str:
     # Clamped at zero: the agent's clock and this one are not the same clock, and a
     # small skew must read as "just now", never as a negative age.
     delta = max(0, int((now - stamp).total_seconds()))
+    # A reading taken while the operator was watching the print happen. "seen 0s ago"
+    # is technically right and reads like a machine; this is the common case, since the
+    # page is usually looked at right after printing something.
+    if delta < 10:
+        return "seen just now"
     if delta < 60:
         return f"seen {delta}s ago"
     if delta < 3600:

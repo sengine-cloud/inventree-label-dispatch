@@ -140,7 +140,8 @@ def _seen(delta: timedelta) -> dict:
 @pytest.mark.parametrize(
     ("delta", "expected"),
     [
-        (timedelta(seconds=0), "seen 0s ago"),
+        (timedelta(seconds=0), "seen just now"),
+        (timedelta(seconds=9), "seen just now"),
         (timedelta(seconds=42), "seen 42s ago"),
         (timedelta(minutes=4), "seen 4m ago"),
         (timedelta(hours=6), "seen 6h ago"),
@@ -188,7 +189,8 @@ def test_a_naive_timestamp_is_read_as_utc():
 def test_a_clock_ahead_of_ours_reads_as_just_now_not_a_negative_age():
     """The agent's clock and InvenTree's are not the same clock."""
     _member, text = classify_status(_seen(timedelta(minutes=-5)), now=NOW)
-    assert "seen 0s ago" in text
+    assert "seen just now" in text
+    assert "-" not in text.split("seen")[-1]
 
 
 # -- job outcomes ----------------------------------------------------------- #
