@@ -33,11 +33,37 @@ InvenTree imports so it is unit-tested here:
 The status is read from the retained topic in three places, which between them keep the
 page honest without polling the printer itself:
 
-| when | hook |
-|---|---|
-| machine initialisation | `init_machine` |
-| a manual restart from the Admin Center | `restart_machine` |
-| periodically | `ping_machines`, driven by InvenTree's `MACHINE_PING_ENABLED` (on by default) |
+| when | hook | asks the printer? |
+|---|---|---|
+| machine initialisation | `init_machine` | no — reads the retained topic |
+| **Restart Machine** in the Admin Center | `restart_machine` | **yes** — publishes `probe` on the `cmd` topic |
+| periodically | `ping_machines`, driven by InvenTree's `MACHINE_PING_ENABLED` (on by default) | no |
+
+**"Restart Machine" is the refresh button.** InvenTree's machine framework has no generic
+custom-action mechanism — `restart_machine` is the one hardcoded action, with its own
+endpoint and a fixed place in the menu — so that item is the only lever a driver gets.
+It now sends `probe` and the agent goes and looks at the printer, rather than re-reading
+the retained topic the page was already showing. The `cmd` topic already existed for
+`flush`, and the broker ACL already grants `inventree` write on it, so this needed no
+new topic and no credential change.
+
+The automatic paths deliberately do *not* probe: neither startup nor the periodic ping
+should dial a sleeping printer on a schedule nobody asked for.
+
+**Two schedules, and only one of them is yours.** `MACHINE_PING_ENABLED` ("Enable Machine
+Ping", on by default, every 5 minutes) governs everything here — InvenTree's task
+short-circuits before any driver is called, so switching it off stops `ping_machines`
+entirely. It does *not* reach the print agent: `device.probe_interval_s` on the agent is
+its own timer, and that is the one that contacts the printer. Turning off Machine Ping
+stops this page **reading**; it does not stop the agent **asking**. Deliberate — the
+retained topic is a shared bus and InvenTree is one consumer of it, so a setting here
+silently reconfiguring the device agent would be the more surprising behaviour.
+
+Nothing is lost by leaving the ping on: it reads a retained message and never touches
+Bluetooth. And there is little point setting `probe_interval_s` below 5 minutes, since
+that is as often as this page re-reads. And a probe the printer
+cannot answer falls back to remembered truth, so the page keeps the old reading and its
+age rather than going blank.
 
 The periodic one is not a nicety. Machine status lives in the Django cache, so clearing
 that cache drops every `machine:*` key at once — and this deployment runs Redis without

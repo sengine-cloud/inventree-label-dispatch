@@ -12,8 +12,11 @@ fork is a reliable source of silently-vanishing publishes.
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from dataclasses import dataclass
+
+from .status import parse_seen_at
 
 #: Mirrors labelfab's contract v1. Kept as a plain dict builder rather than importing
 #: labelfab so the InvenTree image does not pull in Pillow/qrcode a second time.
@@ -142,6 +145,111 @@ def publish_awaiting_result(job: dict, conn: Connection, timeout_s: float) -> di
             return received.get(timeout=timeout_s)
         except queue.Empty:
             return None
+    finally:
+        client.loop_stop()
+        client.disconnect()
+
+
+def probe_status(printer_id: str, conn: Connection, wait_s: float = 8.0) -> dict | None:
+    """Ask the agent to look at the printer, and return the first *newer* reading.
+
+    ``read_status`` returns what the agent *remembers*, which is the right default:
+    the D30 is only reachable while it is being printed to, so remembered truth is
+    almost always the best truth available and costs nothing. This is the other case --
+    a human pressed refresh and wants the printer asked, not the memory read.
+
+    "Newer" is load-bearing and means a ``device_seen_at`` later than the one already
+    retained, not merely the next message to arrive. The agent publishes on its own
+    events too, so without that test a print starting, a broker reconnect or somebody
+    else pressing the same button could be returned as the answer while the real one
+    was thrown away.
+
+    Subscribes *before* publishing the command, because the answer is a retained
+    message and a subscription set up afterwards would race the agent. The retained
+    message already on the topic arrives immediately and is kept as the baseline, so a
+    probe the agent cannot fulfil (the printer is asleep, which is normal) degrades to
+    exactly what ``read_status`` would have returned rather than to nothing -- or to
+    something newer, if one of those other events arrived while we waited.
+
+    ``wait_s`` covers the agent's round trip -- connect, session setup, telemetry,
+    publish -- which is a few seconds when the printer answers and one connect timeout
+    when it does not.
+
+    It is not the whole bound, though, and anyone sizing a request timeout around this
+    should use ``2 * conn.timeout_s + wait_s``: reading the retained message and waiting
+    for the command's PUBACK can each cost ``conn.timeout_s`` first. Both are sub-
+    millisecond against a healthy broker, and a broker slow enough for them to matter
+    has already broken ``read_status`` on every other path. This blocks the request that
+    triggered it either way, so all three are bounded rather than generous.
+    """
+    import queue
+
+    received: queue.Queue = queue.Queue()
+    client = _new_client(conn, "probe")
+    client.on_message = lambda _c, _u, msg: received.put_nowait(msg.payload)
+    client.connect(conn.host, conn.port, conn.keepalive_s)
+    client.subscribe(conn.topic(printer_id, "status"), qos=1)
+    client.loop_start()
+    try:
+        latest = None
+        try:  # the retained message: what we already knew, before asking
+            latest = json.loads(received.get(timeout=conn.timeout_s))
+        except (queue.Empty, ValueError):
+            pass
+
+        # Everything queued before the command goes out is context, not answer: the
+        # retained message plus anything the agent happened to publish while we were
+        # connecting. Folding it into the baseline is what makes "newer than what we
+        # knew" a property of this function rather than a bet on how the agent emits.
+        # Otherwise, when nothing has ever been observed and the baseline is None, the
+        # filter weakens to "the first message carrying any timestamp at all", and that
+        # is only safe because a pre-observation agent publishes null everywhere -- an
+        # invariant that lives in the other repo and could be relaxed there without
+        # anyone here noticing.
+        #
+        # Drained before publishing rather than after, so a quick answer cannot be
+        # swallowed into the baseline it is supposed to beat.
+        while True:
+            try:
+                latest = json.loads(received.get_nowait())
+            except queue.Empty:
+                break
+            except ValueError:
+                continue
+
+        info = client.publish(conn.topic(printer_id, "cmd"), "probe", qos=1)
+        info.wait_for_publish(conn.timeout_s)
+
+        # The answer is the first status carrying an observation *newer* than the one we
+        # already had -- not simply the first status to arrive. The agent publishes on
+        # its own events too (a print starting and finishing, a broker reconnect,
+        # somebody else pressing this button), and any of those landing first would
+        # otherwise be mistaken for the answer while the real one was discarded. The
+        # symptom is mild and self-correcting, which is exactly why it would have been
+        # hard to spot: `state=printing` on a page you just refreshed looks plausible.
+        #
+        # A status published by a print that *did* reach the printer also carries a
+        # newer observation, and returning that is right -- it is the same freshness a
+        # probe would have produced, obtained the same way.
+        baseline = parse_seen_at((latest or {}).get("device_seen_at"))
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline:
+            try:
+                payload = received.get(timeout=max(0.1, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            try:
+                message = json.loads(payload)
+            except ValueError:
+                continue
+            seen = parse_seen_at(message.get("device_seen_at"))
+            if seen is not None and (baseline is None or seen > baseline):
+                return message
+            # Not the answer, but still more current than what we started with: keep it
+            # as the fallback, so a probe that goes unanswered reports the newest state
+            # rather than the one that happened to be retained when we subscribed.
+            latest = message
+        return latest
     finally:
         client.loop_stop()
         client.disconnect()
