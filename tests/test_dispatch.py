@@ -164,11 +164,17 @@ def test_awaiting_result_survives_a_malformed_payload(monkeypatch):
 
 
 class _ProbeBroker(_FakeClient):
-    """Retains one status, and optionally publishes a fresh one when probed."""
+    """Retains one status, and optionally publishes more when probed.
+
+    ``fresh`` may be a single status or a list, so a test can reproduce the agent
+    publishing on its own events -- a print starting, a reconnect -- while a probe is
+    still in flight.
+    """
 
     def __init__(self, retained, fresh=None):
         super().__init__()
-        self.retained, self.fresh = retained, fresh
+        self.retained = retained
+        self.fresh = [] if fresh is None else (fresh if isinstance(fresh, list) else [fresh])
         self.subscribed = []
         self.on_message = None
         self.order = []
@@ -182,8 +188,8 @@ class _ProbeBroker(_FakeClient):
     def publish(self, topic, payload, qos=0):
         self.order.append("publish")
         info = super().publish(topic, payload, qos)
-        if self.fresh is not None:
-            self._deliver(self.fresh)
+        for message in self.fresh:
+            self._deliver(message)
         return info
 
     def _deliver(self, obj):
@@ -246,3 +252,75 @@ def test_probe_survives_a_malformed_retained_payload(monkeypatch):
 
     got = dispatch.probe_status("d30-workshop", conn, wait_s=1)
     assert got == {"state": "idle", "media_ok": True}
+
+
+def test_a_print_starting_mid_probe_does_not_win(monkeypatch):
+    """The agent publishes on its own events -- a print starting, a broker reconnect,
+    another click of the same button. Any of those landing first would otherwise be
+    returned while the real answer was discarded, and `state=printing` on a page you
+    just refreshed looks plausible enough that nobody would report it."""
+    old = "2026-08-01T00:00:00Z"
+    fake = _ProbeBroker(
+        retained={"state": "idle", "media_ok": True, "device_seen_at": old},
+        fresh=[
+            # the in-flight print announcing itself: same observation, new state
+            {"state": "printing", "pending_labels": 3, "device_seen_at": old},
+            # the probe's actual answer
+            {"state": "idle", "media_ok": True, "device_seen_at": "2026-08-02T12:00:00Z"},
+        ],
+    )
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    got = dispatch.probe_status("d30-workshop", Connection(host="broker"), wait_s=1)
+
+    assert got["state"] == "idle"
+    assert got["device_seen_at"] == "2026-08-02T12:00:00Z"
+
+
+def test_a_print_that_reached_the_printer_is_a_valid_answer(monkeypatch):
+    """It carries a newer observation obtained the same way a probe would have."""
+    fake = _ProbeBroker(
+        retained={"state": "idle", "media_ok": True, "device_seen_at": "2026-08-01T00:00:00Z"},
+        fresh=[{"state": "idle", "media_ok": False, "device_seen_at": "2026-08-02T09:00:00Z"}],
+    )
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    got = dispatch.probe_status("d30-workshop", Connection(host="broker"), wait_s=1)
+    assert got["media_ok"] is False
+
+
+def test_an_unanswered_probe_reports_the_newest_state_not_the_stale_one(monkeypatch):
+    """If the printer never answers but the agent said something else meanwhile, that
+    is still more current than what happened to be retained when we subscribed."""
+    old = "2026-08-01T00:00:00Z"
+    fake = _ProbeBroker(
+        retained={"state": "idle", "device_seen_at": old},
+        fresh=[{"state": "printing", "pending_labels": 2, "device_seen_at": old}],
+    )
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    got = dispatch.probe_status("d30-workshop", Connection(host="broker"), wait_s=0.3)
+    assert got["state"] == "printing"
+
+
+def test_an_identical_republish_is_not_an_answer(monkeypatch):
+    """A broker reconnect republishes the same retained status verbatim."""
+    same = {"state": "idle", "media_ok": True, "device_seen_at": "2026-08-01T00:00:00Z"}
+    fake = _ProbeBroker(retained=same, fresh=[dict(same)])
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    got = dispatch.probe_status("d30-workshop", Connection(host="broker"), wait_s=0.3)
+    assert got == same  # fell through to the fallback rather than claiming a fresh look
+
+
+def test_sub_second_stamps_compare_chronologically_not_lexically(monkeypatch):
+    """'...:42.5Z' sorts before '...:42Z' as a string, because '.' precedes 'Z'. Parsing
+    is what keeps a newer reading from being discarded as older."""
+    fake = _ProbeBroker(
+        retained={"state": "idle", "device_seen_at": "2026-08-02T12:00:42Z"},
+        fresh=[{"state": "idle", "media_ok": True, "device_seen_at": "2026-08-02T12:00:42.5Z"}],
+    )
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    got = dispatch.probe_status("d30-workshop", Connection(host="broker"), wait_s=1)
+    assert got["media_ok"] is True

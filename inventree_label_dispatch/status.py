@@ -29,31 +29,45 @@ from datetime import datetime, timezone
 _GOOD_JOB_STATES = frozenset({"completed"})
 
 
-def _ago(seen: object, now: datetime) -> str:
-    """How long ago the device fields were true, as a short suffix. ``""`` if unknown.
+def parse_seen_at(seen: object) -> datetime | None:
+    """``device_seen_at`` as an instant, or ``None`` if it is missing or unusable.
 
     ``seen`` is typed as ``object`` rather than ``str | None`` on purpose: it comes
     straight out of ``json.loads`` on a payload this process did not produce, so it can
     be any JSON type at all, and pretending otherwise would just move the lie into the
     annotation.
 
-    Empty rather than a guess in three cases, all of which mean the same thing: nobody
-    said. An agent older than the field simply omits it, and the page should look
-    exactly as it did before rather than sprouting a fake age.
+    ``None`` in three cases, all of which mean the same thing: nobody said. An agent
+    older than the field simply omits it.
 
     Nothing in here may raise. It runs inside a Django worker on a payload from another
     process, so a surprise is a 500 on the Machines page, not a test failure -- which is
     also why the ``Z`` is handled by hand: pydantic emits it and ``fromisoformat`` did
     not accept it until Python 3.11, while this package supports 3.9.
+
+    Shared with :mod:`dispatch`, which compares two of these rather than rendering one.
+    Comparing the parsed instants and not the raw strings matters: they sort the same
+    way only while every producer emits whole seconds, and ``...:42.5Z`` sorts *before*
+    ``...:42Z`` because ``.`` precedes ``Z``.
     """
     if not seen:
-        return ""
+        return None
     try:
         stamp = datetime.fromisoformat(str(seen).replace("Z", "+00:00"))
     except (TypeError, ValueError):
+        return None
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=timezone.utc)
+
+
+def _ago(seen: object, now: datetime) -> str:
+    """How long ago the device fields were true, as a short suffix. ``""`` if unknown.
+
+    Empty rather than a guess when the agent did not say, so a page served by an agent
+    older than the field looks exactly as it did before rather than sprouting a fake age.
+    """
+    stamp = parse_seen_at(seen)
+    if stamp is None:
         return ""
-    if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
     # Clamped at zero: the agent's clock and this one are not the same clock, and a
     # small skew must read as "just now", never as a negative age.
     delta = max(0, int((now - stamp).total_seconds()))
