@@ -48,7 +48,20 @@ the retained topic the page was already showing. The `cmd` topic already existed
 new topic and no credential change.
 
 The automatic paths deliberately do *not* probe: neither startup nor the periodic ping
-should dial a sleeping printer on a schedule nobody asked for. And a probe the printer
+should dial a sleeping printer on a schedule nobody asked for.
+
+**Two schedules, and only one of them is yours.** `MACHINE_PING_ENABLED` ("Enable Machine
+Ping", on by default, every 5 minutes) governs everything here — InvenTree's task
+short-circuits before any driver is called, so switching it off stops `ping_machines`
+entirely. It does *not* reach the print agent: `device.probe_interval_s` on the agent is
+its own timer, and that is the one that contacts the printer. Turning off Machine Ping
+stops this page **reading**; it does not stop the agent **asking**. Deliberate — the
+retained topic is a shared bus and InvenTree is one consumer of it, so a setting here
+silently reconfiguring the device agent would be the more surprising behaviour.
+
+Nothing is lost by leaving the ping on: it reads a retained message and never touches
+Bluetooth. And there is little point setting `probe_interval_s` below 5 minutes, since
+that is as often as this page re-reads. And a probe the printer
 cannot answer falls back to remembered truth, so the page keeps the old reading and its
 age rather than going blank.
 
