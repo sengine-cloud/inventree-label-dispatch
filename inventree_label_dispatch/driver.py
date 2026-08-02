@@ -30,7 +30,14 @@ from machine.machine_types.label_printer import LabelPrinterStatus
 from rest_framework import serializers
 
 from .config import connection_from_env
-from .dispatch import build_job, build_label, publish, publish_awaiting_result, read_status
+from .dispatch import (
+    build_job,
+    build_label,
+    probe_status,
+    publish,
+    publish_awaiting_result,
+    read_status,
+)
 from .extractors import extract
 from .status import classify_result, classify_status
 
@@ -111,15 +118,27 @@ class LabelfabDriver(LabelPrinterBaseDriver):
         machine.set_status_text(text)
 
     def restart_machine(self, machine) -> None:
-        """Re-read the printer's state after a manual restart.
+        """Ask the printer what it is, and show the answer. The page's refresh button.
 
         A restart clears the machine's shared state, and without this nothing puts it
         back: the page then shows UNKNOWN with an empty status text -- the defaults
         `get_shared_state` returns for missing keys -- while the machine itself
         reports `initialized`, no errors and a driver available. An empty status text
         is diagnostic on its own, since no path in this driver produces one.
+
+        This is also the only lever there is. InvenTree's machine framework has no
+        generic custom-action mechanism -- `restart_machine` is the one hardcoded
+        action, with its own endpoint and a fixed place in the Machines menu -- so
+        "Restart Machine" *is* the refresh button whether or not it is called that.
+        Making it re-read the retained topic and nothing else wasted it: the topic
+        holds what the agent last heard, which is the same thing the page was already
+        showing. Now it sends `probe` and the agent goes and looks.
+
+        Falls back to remembered truth when the printer does not answer, which is the
+        normal case for a D30 that has powered itself down: the reading keeps its old
+        `device_seen_at` and the page says how old it is, instead of going blank.
         """
-        self._refresh_status(machine)
+        self._refresh_status(machine, probe=True)
 
     def ping_machines(self) -> None:
         """Periodic refresh, driven by InvenTree's MACHINE_PING_ENABLED (default on).
@@ -141,10 +160,17 @@ class LabelfabDriver(LabelPrinterBaseDriver):
             except Exception as exc:  # noqa: BLE001 - one machine must not break the loop
                 machine.handle_error(exc)
 
-    def _refresh_status(self, machine) -> None:
+    def _refresh_status(self, machine, *, probe: bool = False) -> None:
+        """Read the retained status, or ask the printer for a fresh one.
+
+        ``probe`` is off for the automatic paths -- init and the periodic ping -- so
+        neither of them dials a sleeping printer on a schedule nobody asked for. It is
+        on only where a human pressed the button.
+        """
         printer_id = machine.get_setting("PRINTER_ID", "D")
         try:
-            status = read_status(printer_id, connection_from_env())
+            conn = connection_from_env()
+            status = probe_status(printer_id, conn) if probe else read_status(printer_id, conn)
         except Exception as exc:
             machine.set_status(LabelPrinterStatus.UNKNOWN)
             machine.set_status_text(_("could not reach the broker: %(err)s") % {"err": str(exc)[:80]})

@@ -12,6 +12,7 @@ fork is a reliable source of silently-vanishing publishes.
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -142,6 +143,59 @@ def publish_awaiting_result(job: dict, conn: Connection, timeout_s: float) -> di
             return received.get(timeout=timeout_s)
         except queue.Empty:
             return None
+    finally:
+        client.loop_stop()
+        client.disconnect()
+
+
+def probe_status(printer_id: str, conn: Connection, wait_s: float = 8.0) -> dict | None:
+    """Ask the agent to go and look at the printer, and return what it then publishes.
+
+    ``read_status`` returns what the agent *remembers*, which is the right default:
+    the D30 is only reachable while it is being printed to, so remembered truth is
+    almost always the best truth available and costs nothing. This is the other case --
+    a human pressed refresh and wants the printer asked, not the memory read.
+
+    Subscribes *before* publishing the command, because the answer is a retained
+    message and a subscription set up afterwards would race the agent. The retained
+    message already on the topic arrives immediately and is kept as the baseline, so a
+    probe the agent cannot fulfil (the printer is asleep, which is normal) degrades to
+    exactly what ``read_status`` would have returned rather than to nothing.
+
+    ``wait_s`` covers the agent's whole round trip -- connect, session setup, telemetry,
+    publish -- which is a few seconds when the printer answers and one connect timeout
+    when it does not. This blocks the request that triggered it, so it is bounded
+    rather than generous.
+    """
+    import queue
+
+    received: queue.Queue = queue.Queue()
+    client = _new_client(conn, "probe")
+    client.on_message = lambda _c, _u, msg: received.put_nowait(msg.payload)
+    client.connect(conn.host, conn.port, conn.keepalive_s)
+    client.subscribe(conn.topic(printer_id, "status"), qos=1)
+    client.loop_start()
+    try:
+        latest = None
+        try:  # the retained message: what we already knew, before asking
+            latest = json.loads(received.get(timeout=conn.timeout_s))
+        except (queue.Empty, ValueError):
+            pass
+
+        info = client.publish(conn.topic(printer_id, "cmd"), "probe", qos=1)
+        info.wait_for_publish(conn.timeout_s)
+
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline:
+            try:
+                payload = received.get(timeout=max(0.1, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            try:
+                return json.loads(payload)
+            except ValueError:
+                continue
+        return latest
     finally:
         client.loop_stop()
         client.disconnect()

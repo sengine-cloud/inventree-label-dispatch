@@ -33,11 +33,24 @@ InvenTree imports so it is unit-tested here:
 The status is read from the retained topic in three places, which between them keep the
 page honest without polling the printer itself:
 
-| when | hook |
-|---|---|
-| machine initialisation | `init_machine` |
-| a manual restart from the Admin Center | `restart_machine` |
-| periodically | `ping_machines`, driven by InvenTree's `MACHINE_PING_ENABLED` (on by default) |
+| when | hook | asks the printer? |
+|---|---|---|
+| machine initialisation | `init_machine` | no — reads the retained topic |
+| **Restart Machine** in the Admin Center | `restart_machine` | **yes** — publishes `probe` on the `cmd` topic |
+| periodically | `ping_machines`, driven by InvenTree's `MACHINE_PING_ENABLED` (on by default) | no |
+
+**"Restart Machine" is the refresh button.** InvenTree's machine framework has no generic
+custom-action mechanism — `restart_machine` is the one hardcoded action, with its own
+endpoint and a fixed place in the menu — so that item is the only lever a driver gets.
+It now sends `probe` and the agent goes and looks at the printer, rather than re-reading
+the retained topic the page was already showing. The `cmd` topic already existed for
+`flush`, and the broker ACL already grants `inventree` write on it, so this needed no
+new topic and no credential change.
+
+The automatic paths deliberately do *not* probe: neither startup nor the periodic ping
+should dial a sleeping printer on a schedule nobody asked for. And a probe the printer
+cannot answer falls back to remembered truth, so the page keeps the old reading and its
+age rather than going blank.
 
 The periodic one is not a nicety. Machine status lives in the Django cache, so clearing
 that cache drops every `machine:*` key at once — and this deployment runs Redis without

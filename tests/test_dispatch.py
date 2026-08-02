@@ -155,3 +155,94 @@ def test_awaiting_result_survives_a_malformed_payload(monkeypatch):
     fake.publish = publish_with_garbage
     result = dispatch.publish_awaiting_result(job, Connection(host="broker"), timeout_s=1.0)
     assert result["state"] == "completed"
+
+
+# -- refresh: ask the printer, not the memory ------------------------------- #
+#
+# read_status returns what the agent remembers, which is the right default. probe_status
+# is the other case: a human pressed refresh and wants the printer actually asked.
+
+
+class _ProbeBroker(_FakeClient):
+    """Retains one status, and optionally publishes a fresh one when probed."""
+
+    def __init__(self, retained, fresh=None):
+        super().__init__()
+        self.retained, self.fresh = retained, fresh
+        self.subscribed = []
+        self.on_message = None
+        self.order = []
+
+    def subscribe(self, topic, qos=0):
+        self.subscribed.append(topic)
+        self.order.append("subscribe")
+        if self.retained is not None:  # retained messages arrive on subscribe
+            self._deliver(self.retained)
+
+    def publish(self, topic, payload, qos=0):
+        self.order.append("publish")
+        info = super().publish(topic, payload, qos)
+        if self.fresh is not None:
+            self._deliver(self.fresh)
+        return info
+
+    def _deliver(self, obj):
+        payload = obj if isinstance(obj, bytes) else json.dumps(obj).encode()
+        self.on_message(self, None, type("Msg", (), {"payload": payload})())
+
+
+def test_probe_asks_the_agent_and_returns_the_fresh_answer(monkeypatch):
+    fake = _ProbeBroker(
+        retained={"state": "idle", "media_ok": True, "device_seen_at": "2026-08-01T00:00:00Z"},
+        fresh={"state": "idle", "media_ok": True, "device_seen_at": "2026-08-02T12:00:00Z"},
+    )
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    got = dispatch.probe_status("d30-workshop", Connection(host="broker"), wait_s=1)
+
+    assert got["device_seen_at"] == "2026-08-02T12:00:00Z"
+    topic, payload, qos = fake.published[0]
+    assert topic == "se/v1/print/d30-workshop/cmd"
+    assert payload == "probe"
+    assert qos == 1
+
+
+def test_probe_subscribes_before_asking(monkeypatch):
+    """The answer is a retained publish; subscribing afterwards races the agent."""
+    fake = _ProbeBroker(retained={"state": "idle"}, fresh={"state": "idle"})
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    dispatch.probe_status("d30-workshop", Connection(host="broker"), wait_s=1)
+
+    assert fake.order[:2] == ["subscribe", "publish"]
+
+
+def test_a_printer_that_does_not_answer_falls_back_to_what_we_knew(monkeypatch):
+    """The normal case for a D30 that has powered itself down. The reading keeps its
+    old timestamp and the page says how old it is, rather than going blank."""
+    fake = _ProbeBroker(
+        retained={"state": "idle", "media_ok": True, "device_seen_at": "2026-08-01T00:00:00Z"},
+        fresh=None,  # agent probed, printer was asleep, so it published nothing
+    )
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    got = dispatch.probe_status("d30-workshop", Connection(host="broker"), wait_s=0.3)
+
+    assert got["device_seen_at"] == "2026-08-01T00:00:00Z"
+
+
+def test_probe_with_nothing_retained_and_no_answer_is_none(monkeypatch):
+    fake = _ProbeBroker(retained=None, fresh=None)
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+    conn = Connection(host="broker", timeout_s=0.3)
+
+    assert dispatch.probe_status("d30-workshop", conn, wait_s=0.3) is None
+
+
+def test_probe_survives_a_malformed_retained_payload(monkeypatch):
+    fake = _ProbeBroker(retained=b"{not json", fresh={"state": "idle", "media_ok": True})
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+    conn = Connection(host="broker", timeout_s=0.3)
+
+    got = dispatch.probe_status("d30-workshop", conn, wait_s=1)
+    assert got == {"state": "idle", "media_ok": True}
