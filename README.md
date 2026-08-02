@@ -44,10 +44,22 @@ that cache drops every `machine:*` key at once — and this deployment runs Redi
 persistence, so a restart does exactly that. With only `init_machine` the page then sat
 at `UNKNOWN` with an empty status text until someone printed or the pods restarted.
 
-Two deliberate distinctions. **Unreported media is not healthy media**: `media_ok` is a
+Three deliberate distinctions. **Unreported media is not healthy media**: `media_ok` is a
 tri-state, and a printer that has said nothing shows "media unreported" rather than
-"media ok". And **battery percentage alone is not enough** — it pins at 100% whenever
-the unit is on charge, so the voltage is shown beside it.
+"media ok". **Battery percentage alone is not enough** — it pins at 100% whenever
+the unit is on charge, so the voltage is shown beside it. And **a memory is not an
+observation**: the D30 is only reachable while it is being printed to, so the agent
+republishes what it last heard rather than going quiet, and the age of that reading is
+shown alongside it.
+
+```
+CONNECTED   fw 2.1.2 · 100% (4.17V) · media ok · Q223P4C31420105 · seen 6h ago
+```
+
+The age comes from `device_seen_at` on the retained status. It annotates the reading
+rather than overruling it — a printer that had tape six hours ago is far likelier to
+still have tape than to have anything else — so the status mapping is unchanged. An
+agent too old to publish the field renders exactly as it did before.
 
 ## Print outcomes
 

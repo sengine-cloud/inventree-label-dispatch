@@ -5,7 +5,7 @@ is thin by design and cannot be unit-tested here -- InvenTree is not a dependenc
 this package's test environment -- so the decisions worth testing live here and return
 a ``LabelPrinterStatus`` *member name* for the driver to look up.
 
-Two rules the mapping is built around:
+Three rules the mapping is built around:
 
 * **Silence is not health.** ``media_ok`` is ``None`` when the printer has not said
   anything about its media, which is a different state from "media is fine". Reporting
@@ -14,15 +14,54 @@ Two rules the mapping is built around:
 * **A media fault is not a generic error.** InvenTree has NO_MEDIA (301) for exactly
   this, and it renders differently from ERROR (500). Using the specific code is the
   difference between "go put tape in it" and "something is wrong, go investigate".
+* **Memory is not observation.** The D30 is only reachable while it is being printed
+  to, so the agent remembers what it last heard and republishes it. Nearly everything
+  on this page is therefore last-known rather than live, and rendering it without its
+  age is the first rule again one layer along -- "media ok" from three days ago reads
+  exactly like "media ok" from a minute ago.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 #: Terminal job states that mean tape came out as intended.
 _GOOD_JOB_STATES = frozenset({"completed"})
 
 
-def _describe(status: dict) -> str:
+def _ago(seen, now: datetime) -> str:
+    """How long ago the device fields were true, as a short suffix. ``""`` if unknown.
+
+    Empty rather than a guess in three cases, all of which mean the same thing: nobody
+    said. An agent older than the field simply omits it, and the page should look
+    exactly as it did before rather than sprouting a fake age.
+
+    Nothing in here may raise. It runs inside a Django worker on a payload from another
+    process, so a surprise is a 500 on the Machines page, not a test failure -- which is
+    also why the ``Z`` is handled by hand: pydantic emits it and ``fromisoformat`` did
+    not accept it until Python 3.11, while this package supports 3.9.
+    """
+    if not seen:
+        return ""
+    try:
+        stamp = datetime.fromisoformat(str(seen).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ""
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    # Clamped at zero: the agent's clock and this one are not the same clock, and a
+    # small skew must read as "just now", never as a negative age.
+    delta = max(0, int((now - stamp).total_seconds()))
+    if delta < 60:
+        return f"seen {delta}s ago"
+    if delta < 3600:
+        return f"seen {delta // 60}m ago"
+    if delta < 86400:
+        return f"seen {delta // 3600}h ago"
+    return f"seen {delta // 86400}d ago"
+
+
+def _describe(status: dict, now: datetime) -> str:
     """A one-line summary of the device truth on the retained status topic."""
     bits: list[str] = []
     if firmware := status.get("firmware"):
@@ -42,20 +81,25 @@ def _describe(status: dict) -> str:
 
     if serial := status.get("serial"):
         bits.append(serial)
+    # Last, because it qualifies everything before it rather than being another reading.
+    if age := _ago(status.get("device_seen_at"), now):
+        bits.append(age)
     return " · ".join(bits)
 
 
-def classify_status(status: dict | None) -> tuple[str, str]:
+def classify_status(status: dict | None, *, now: datetime | None = None) -> tuple[str, str]:
     """Map a retained ``PrinterStatus`` to ``(LabelPrinterStatus member, text)``.
 
     ``status`` is ``None`` when nothing is retained on the topic -- the agent has never
     run, or its status was cleared. That is genuinely unknown, not disconnected.
+
+    ``now`` is injectable so the age rendering is testable without freezing wall time.
     """
     if status is None:
         return "UNKNOWN", "no retained status; the print agent has not published yet"
 
     state = status.get("state")
-    detail = _describe(status)
+    detail = _describe(status, now or datetime.now(timezone.utc))
 
     if state == "disconnected":
         # The agent's MQTT will, or its own shutdown notice. The broker is reachable;
