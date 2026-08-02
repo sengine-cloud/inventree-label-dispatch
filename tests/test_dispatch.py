@@ -324,3 +324,37 @@ def test_sub_second_stamps_compare_chronologically_not_lexically(monkeypatch):
 
     got = dispatch.probe_status("d30-workshop", Connection(host="broker"), wait_s=1)
     assert got["media_ok"] is True
+
+
+def test_a_status_published_before_the_command_is_context_not_answer(monkeypatch):
+    """Whatever the agent published while we were connecting is part of what we already
+    knew. Folding it into the baseline is what stops `probe_status` depending on the
+    agent's emission contract: without it, a never-observed printer weakens the filter
+    to "the first message carrying any timestamp at all"."""
+
+    class _EarlyPublisher(_ProbeBroker):
+        def subscribe(self, topic, qos=0):
+            super().subscribe(topic, qos)
+            # arrives after the retained one but before we send the command
+            self._deliver({"state": "idle", "media_ok": True, "device_seen_at": "2026-08-02T10:00:00Z"})
+
+    fake = _EarlyPublisher(
+        retained={"state": "idle", "device_seen_at": None},
+        fresh=[{"state": "idle", "media_ok": False, "device_seen_at": "2026-08-02T12:00:00Z"}],
+    )
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    got = dispatch.probe_status("d30-workshop", Connection(host="broker"), wait_s=1)
+
+    # the 10:00 reading was already on the wire before we asked, so the answer is 12:00
+    assert got["device_seen_at"] == "2026-08-02T12:00:00Z"
+    assert got["media_ok"] is False
+
+
+def test_a_never_observed_printer_still_falls_back_rather_than_inventing(monkeypatch):
+    """Nothing retained, nothing observed, printer asleep: there is no answer to give."""
+    fake = _ProbeBroker(retained={"state": "idle", "device_seen_at": None}, fresh=None)
+    monkeypatch.setattr(dispatch, "_new_client", lambda conn, suffix: fake)
+
+    got = dispatch.probe_status("d30-workshop", Connection(host="broker"), wait_s=0.3)
+    assert got == {"state": "idle", "device_seen_at": None}

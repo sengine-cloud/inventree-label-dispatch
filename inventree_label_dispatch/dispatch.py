@@ -171,10 +171,16 @@ def probe_status(printer_id: str, conn: Connection, wait_s: float = 8.0) -> dict
     exactly what ``read_status`` would have returned rather than to nothing -- or to
     something newer, if one of those other events arrived while we waited.
 
-    ``wait_s`` covers the agent's whole round trip -- connect, session setup, telemetry,
+    ``wait_s`` covers the agent's round trip -- connect, session setup, telemetry,
     publish -- which is a few seconds when the printer answers and one connect timeout
-    when it does not. This blocks the request that triggered it, so it is bounded
-    rather than generous.
+    when it does not.
+
+    It is not the whole bound, though, and anyone sizing a request timeout around this
+    should use ``2 * conn.timeout_s + wait_s``: reading the retained message and waiting
+    for the command's PUBACK can each cost ``conn.timeout_s`` first. Both are sub-
+    millisecond against a healthy broker, and a broker slow enough for them to matter
+    has already broken ``read_status`` on every other path. This blocks the request that
+    triggered it either way, so all three are bounded rather than generous.
     """
     import queue
 
@@ -190,6 +196,26 @@ def probe_status(printer_id: str, conn: Connection, wait_s: float = 8.0) -> dict
             latest = json.loads(received.get(timeout=conn.timeout_s))
         except (queue.Empty, ValueError):
             pass
+
+        # Everything queued before the command goes out is context, not answer: the
+        # retained message plus anything the agent happened to publish while we were
+        # connecting. Folding it into the baseline is what makes "newer than what we
+        # knew" a property of this function rather than a bet on how the agent emits.
+        # Otherwise, when nothing has ever been observed and the baseline is None, the
+        # filter weakens to "the first message carrying any timestamp at all", and that
+        # is only safe because a pre-observation agent publishes null everywhere -- an
+        # invariant that lives in the other repo and could be relaxed there without
+        # anyone here noticing.
+        #
+        # Drained before publishing rather than after, so a quick answer cannot be
+        # swallowed into the baseline it is supposed to beat.
+        while True:
+            try:
+                latest = json.loads(received.get_nowait())
+            except queue.Empty:
+                break
+            except ValueError:
+                continue
 
         info = client.publish(conn.topic(printer_id, "cmd"), "probe", qos=1)
         info.wait_for_publish(conn.timeout_s)
