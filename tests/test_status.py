@@ -7,6 +7,8 @@ DISCONNECTED 400, ERROR 500.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from inventree_label_dispatch.status import classify_result, classify_status
@@ -119,6 +121,74 @@ def test_missing_optional_fields_do_not_break_the_description():
     )
     assert member == "CONNECTED"
     assert "media unreported" in text
+
+
+# -- how old the device truth is -------------------------------------------- #
+#
+# The printer is only reachable while it is being printed to, so the agent republishes
+# what it last heard rather than going quiet. That is the right trade, but it means
+# "media ok" on this page is usually a memory, and a memory rendered without its age is
+# indistinguishable from an observation.
+
+NOW = datetime(2026, 8, 2, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _seen(delta: timedelta) -> dict:
+    return _healthy(device_seen_at=(NOW - delta).isoformat().replace("+00:00", "Z"))
+
+
+@pytest.mark.parametrize(
+    ("delta", "expected"),
+    [
+        (timedelta(seconds=0), "seen 0s ago"),
+        (timedelta(seconds=42), "seen 42s ago"),
+        (timedelta(minutes=4), "seen 4m ago"),
+        (timedelta(hours=6), "seen 6h ago"),
+        (timedelta(days=3), "seen 3d ago"),
+    ],
+)
+def test_the_age_of_the_device_truth_is_shown(delta, expected):
+    _member, text = classify_status(_seen(delta), now=NOW)
+    assert expected in text
+
+
+def test_stale_truth_is_still_the_best_truth_available():
+    """Age annotates the reading; it does not overrule it. A printer that had tape three
+    days ago is far more likely to still have tape than to have anything else."""
+    member, text = classify_status(_seen(timedelta(days=3)), now=NOW)
+    assert member == "CONNECTED"
+    assert "media ok" in text
+    assert "seen 3d ago" in text
+
+
+def test_an_agent_that_does_not_publish_the_field_renders_as_before():
+    """Back-compat with an un-upgraded agent: no field, no invented age."""
+    _member, text = classify_status(_healthy(), now=NOW)
+    assert "seen" not in text
+    assert "fw 2.1.2" in text
+
+
+@pytest.mark.parametrize("value", [None, "", "not a timestamp", 12345, "2026-13-45T99:99:99Z"])
+def test_an_unusable_timestamp_is_dropped_not_raised(value):
+    """This runs in a Django worker on a payload from another process, so a surprise
+    here is a 500 on the Machines page rather than a red test."""
+    _member, text = classify_status(_healthy(device_seen_at=value), now=NOW)
+    assert "seen" not in text
+
+
+def test_a_naive_timestamp_is_read_as_utc():
+    """Everything the agent publishes is UTC; a missing offset is not a reason to guess
+    local time, which would silently shift the age by hours."""
+    _member, text = classify_status(
+        _healthy(device_seen_at="2026-08-02T11:00:00"), now=NOW
+    )
+    assert "seen 1h ago" in text
+
+
+def test_a_clock_ahead_of_ours_reads_as_just_now_not_a_negative_age():
+    """The agent's clock and InvenTree's are not the same clock."""
+    _member, text = classify_status(_seen(timedelta(minutes=-5)), now=NOW)
+    assert "seen 0s ago" in text
 
 
 # -- job outcomes ----------------------------------------------------------- #
