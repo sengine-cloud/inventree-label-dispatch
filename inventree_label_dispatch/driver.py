@@ -192,13 +192,17 @@ class LabelfabDriver(LabelPrinterBaseDriver):
         tape_kind = machine.get_setting("TAPE_KIND", "D") or "continuous"
         length = options.get("label_length_mm")
 
+        # Read once per batch: the prefix is an InvenTree setting, not per item.
+        from .barcode import short_prefix
+
+        prefix = short_prefix()
         labels = []
         for item in items:
             if server_render:
                 png = self._png(label, item)
                 spec = {"elements": [{"type": "raw_png", "data_b64": png, "fit": "contain"}]}
             else:
-                spec = {"preset": preset, "vars": extract(item)}
+                spec = {"preset": preset, "vars": extract(item, prefix)}
             labels.append(build_label(spec, copies=copies, length_mm=length))
 
         job = build_job(
