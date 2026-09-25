@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inventree-label-dispatch"
-description = "InvenTree machine driver that dispatches labels to a labelfab print agent"
+description = "InvenTree machine driver that dispatches labels to a labelfab print agent, and scans them back"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -23,6 +23,7 @@ dev = ["pytest>=8", "ruff>=0.4"]
 # deliberately not dependencies here.
 [project.entry-points."inventree_plugins"]
 LabelfabDispatch = "inventree_label_dispatch.plugin:LabelfabDispatchPlugin"
+LabelfabShortlink = "inventree_label_dispatch.barcode:LabelfabShortlinkPlugin"
 
 [project.urls]
 Homepage = "https://github.com/sengine-cloud/inventree-label-dispatch"

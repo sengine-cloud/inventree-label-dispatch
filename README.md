@@ -3,7 +3,8 @@
 An InvenTree **machine driver** that dispatches label print jobs to a
 [labelfab](https://github.com/sengine-cloud/labelfab) agent over MQTT. Click *Print*
 in InvenTree; a job lands on the broker; the agent renders and prints it on a Phomemo
-D30.
+D30. A second plugin in the same package resolves the printed QR codes back to their
+InvenTree items when scanned.
 
 ## Why a machine driver, not a `LabelPrintingMixin`
 
@@ -118,6 +119,10 @@ next refresh picks up the truth from the retained topic.
 - Default path sends `{preset, vars}` — the producer stays dumb and layout ownership
   stays in the agent. Extractors map a `StockItem` / `Part` / `StockLocation` to a
   short scannable code plus title/sub text.
+- The title leads with the item's InvenTree short barcode and IPN (`INV-SI1 · A1533`),
+  with the name underneath. The short barcode can be typed into InvenTree's scanner as
+  is, so a label stays usable when its QR does not scan. The prefix is read from the
+  builtin barcode plugin's `SHORT_BARCODE_PREFIX`, so it follows the instance.
 - `server_render` (a per-machine setting or a per-print option) is the escape hatch:
   render the InvenTree label template to PNG here and send it as a `raw_png` element.
   One awkward label becomes a checkbox, not a code change.
@@ -143,12 +148,31 @@ the Django-Q worker (that is where `print_labels` runs):
 Per-printer settings (Printer ID, tape width/kind, default preset, server render)
 live on the machine in the InvenTree admin.
 
+## Scanning labels back
+
+The QR on a label encodes the agent's `render.qr_base_url` plus a bare code, for example
+`https://sngn.top/i/SI1`. A phone opens that as a link, but InvenTree's own scanner only
+knows its native short format (`INV-SI1`) and answers "No match found".
+
+**LabelfabShortlink** (`labelfab-shortlink`) closes that gap. It strips the configured
+base, rebuilds `INV-SI1`, and hands it to InvenTree's builtin barcode plugin, so model
+codes, permissions and the response are all InvenTree's own. Nothing has to be linked
+per item.
+
+1. **Admin → Plugins**: activate **LabelfabShortlink**.
+2. Set **Short link base** to the same value as the agent's `render.qr_base_url`.
+   Scheme and case are ignored when matching, so labels printed as `SNGN.TOP/I/PA39`
+   and as `https://sngn.top/i/PA39` both resolve. Empty disables the plugin.
+
+It depends on the builtin **InvenTreeBarcode** plugin being active, which it is by
+default.
+
 ## Development
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -e '.[dev]'
-pytest        # covers the pure dispatch + extractor logic
+pytest        # covers the pure dispatch, extractor and short-link logic
 ruff check inventree_label_dispatch tests
 ```
 
