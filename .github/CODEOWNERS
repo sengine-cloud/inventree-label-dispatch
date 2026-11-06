@@ -1,0 +1,5 @@
+# Security-critical paths are latched to the maintainers team: CI, token-mint trust
+# policies, and this file itself. See sengine-cloud/actions/DESIGN.md.
+/.github/workflows/   @sengine-cloud/maintainers
+/.github/chainguard/  @sengine-cloud/maintainers
+/.github/CODEOWNERS   @sengine-cloud/maintainers
